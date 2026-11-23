@@ -1,4 +1,4 @@
-from mcp.server.mcpserver import MCPServer
+from kate_mcp.server.mcpserver import MCPServer
 
 mcp = MCPServer("Mi servidor")
 
