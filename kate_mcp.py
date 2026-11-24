@@ -61,6 +61,9 @@ def _norm(texto: str) -> str:
 #                       es monótona: agregar clases solo puede empeorarla).
 #   categoria "requisito": exige incluir una materia (no es monótona: no sirve para
 #                       podar; el voraz la fija primero).
+#   categoria "minimo":   cota inferior sobre el horario completo (agregar clases solo
+#                       puede ayudar, así que tampoco sirve para podar; el voraz la
+#                       comprueba al final y, si falta, intenta completar).
 #   categoria "preferencia": solo existe como blanda.
 # Dureza "dura": invalida (filtro, plan, requisito). Dureza "blanda": nunca invalida;
 # suma o resta hasta peso * ESCALA_PREFERENCIA puntos al valor de cada sección.
@@ -105,6 +108,20 @@ TIPOS_RESTRICCION: dict[str, dict] = {
         ),
         "campos": {"horas": "número > 0"},
         "ejemplo": {"tipo": "max_horas_por_dia", "dureza": "dura", "horas": 8},
+    },
+    "max_creditos": {
+        "categoria": "plan",
+        "dureza_permitida": ["dura"],
+        "descripcion": "La suma de créditos del horario no puede superar los créditos dados.",
+        "campos": {"creditos": "número > 0"},
+        "ejemplo": {"tipo": "max_creditos", "dureza": "dura", "creditos": 30},
+    },
+    "min_creditos": {
+        "categoria": "minimo",
+        "dureza_permitida": ["dura"],
+        "descripcion": "La suma de créditos del horario debe ser al menos los créditos dados.",
+        "campos": {"creditos": "número > 0"},
+        "ejemplo": {"tipo": "min_creditos", "dureza": "dura", "creditos": 20},
     },
     "ventana_libre": {
         "categoria": "filtro",
@@ -185,6 +202,10 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
             if float(r["horas"]) <= 0:
                 raise ValueError("max_horas_por_dia: 'horas' debe ser mayor que 0.")
             n["horas"] = float(r["horas"])
+        elif tipo in ("max_creditos", "min_creditos"):
+            if float(r["creditos"]) <= 0:
+                raise ValueError(f"{tipo}: 'creditos' debe ser mayor que 0.")
+            n["creditos"] = float(r["creditos"])
         elif tipo == "ventana_libre":
             dias = [str(d).upper() for d in r["dias"]]
             invalidos = set(dias) - DIAS_VALIDOS
@@ -210,6 +231,13 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
                 raise ValueError(f"{tipo}: 'peso' debe estar en el rango (0, 1].")
             n["peso"] = peso
         normalizadas.append(n)
+    maximos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "max_creditos"]
+    minimos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "min_creditos"]
+    if maximos and minimos and max(minimos) > min(maximos):
+        raise ValueError(
+            f"min_creditos ({max(minimos):g}) no puede ser mayor que "
+            f"max_creditos ({min(maximos):g})."
+        )
     return normalizadas
 
 
@@ -226,6 +254,10 @@ def _describir_base(r: dict) -> str:
         return f"sin clases en el edificio {r['edificio']}"
     if t == "max_horas_por_dia":
         return f"máximo {r['horas']:g} h por día en la universidad"
+    if t == "max_creditos":
+        return f"máximo {r['creditos']:g} créditos en total"
+    if t == "min_creditos":
+        return f"mínimo {r['creditos']:g} créditos en total"
     if t == "ventana_libre":
         return f"ventana libre de {r['inicio']} a {r['fin']} los días {', '.join(r['dias'])}"
     if t == "incluir_materia":
@@ -262,8 +294,14 @@ def _cumple_filtro(clase: dict, r: dict) -> bool:
     raise ValueError(f"{t} no es un filtro.")
 
 
+def _total_creditos(subconjunto: list[dict]) -> int:
+    return sum(c["creditos"] for c in subconjunto)
+
+
 def _cumple_plan(subconjunto: list[dict], r: dict) -> bool:
-    """True si el horario completo satisface la restricción de plan r."""
+    """True si el horario (posiblemente parcial) satisface la restricción de plan r."""
+    if r["tipo"] == "max_creditos":
+        return _total_creditos(subconjunto) <= r["creditos"]
     if r["tipo"] == "max_horas_por_dia":
         por_dia: dict[str, tuple[int, int]] = {}
         for c in subconjunto:
@@ -276,6 +314,13 @@ def _cumple_plan(subconjunto: list[dict], r: dict) -> bool:
         limite = r["horas"] * 60
         return all(fin - ini <= limite for ini, fin in por_dia.values())
     raise ValueError(f"{r['tipo']} no es una restricción de plan.")
+
+
+def _cumple_minimo(subconjunto: list[dict], r: dict) -> bool:
+    """True si el horario COMPLETO satisface la cota mínima r (no aplica a parciales)."""
+    if r["tipo"] == "min_creditos":
+        return _total_creditos(subconjunto) >= r["creditos"]
+    raise ValueError(f"{r['tipo']} no es una restricción de mínimo.")
 
 
 def _clase(r: dict) -> str:
@@ -328,8 +373,8 @@ def aplicar_filtros(
 #   - Cada candidata tiene un valor y un costo en créditos.
 #   - Dos NRC no pueden coexistir si se traslapan en día y hora,
 #     o si son la misma materia (misma clave, distinta sección).
-#   - La suma de créditos no puede pasar de max_creditos.
-#   - El horario debe cumplir las restricciones de plan.
+#   - El horario debe cumplir las restricciones de plan (incluido el tope de
+#     créditos, 'max_creditos') y las cotas mínimas ('min_creditos').
 # Generaliza la mochila 0/1 (capacidad = créditos) con conflictos entre pares.
 # ---------------------------------------------------------------------------
 
@@ -363,16 +408,16 @@ def _valor(clase: dict, blandas: list[dict] | None = None) -> float:
 
 def _es_factible(
     subconjunto: list[dict],
-    max_creditos: int,
     plan: list[dict],
     requisitos: list[dict] | None = None,
+    minimos: list[dict] | None = None,
 ) -> bool:
-    if sum(c["creditos"] for c in subconjunto) > max_creditos:
+    if not all(_cumple_plan(subconjunto, r) for r in plan):
         return False
     for a, b in combinations(subconjunto, 2):
         if hay_conflicto(a, b):
             return False
-    if not all(_cumple_plan(subconjunto, r) for r in plan):
+    if not all(_cumple_minimo(subconjunto, r) for r in minimos or []):
         return False
     return all(
         any(_coincide_materia(c, r) for c in subconjunto) for r in requisitos or []
@@ -405,10 +450,10 @@ def _resultado(
 
 def horario_fuerza_bruta(
     candidatas: list[dict],
-    max_creditos: int,
     plan: list[dict] | None = None,
     requisitos: list[dict] | None = None,
     blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
 ) -> dict:
     plan = plan or []
     n = len(candidatas)
@@ -422,7 +467,7 @@ def horario_fuerza_bruta(
     for mascara in range(1 << n):
         subconjunto = [candidatas[i] for i in range(n) if mascara >> i & 1]
         evaluaciones += 1
-        if not _es_factible(subconjunto, max_creditos, plan, requisitos):
+        if not _es_factible(subconjunto, plan, requisitos, minimos):
             continue
         valor = sum(_valor(c, blandas) for c in subconjunto)
         if valor > mejor_valor:
@@ -436,11 +481,7 @@ def horario_fuerza_bruta(
 # Muy rápida, pero no garantiza el óptimo.
 # ---------------------------------------------------------------------------
 
-def _puede_agregar(
-    clase: dict, elegidas: list[dict], creditos: int, max_creditos: int, plan: list[dict]
-) -> bool:
-    if creditos + clase["creditos"] > max_creditos:
-        return False
+def _puede_agregar(clase: dict, elegidas: list[dict], plan: list[dict]) -> bool:
     if any(hay_conflicto(clase, otra) for otra in elegidas):
         return False
     # Las restricciones de plan son monótonas: si agregar la clase las rompe,
@@ -450,15 +491,15 @@ def _puede_agregar(
 
 def horario_voraz(
     candidatas: list[dict],
-    max_creditos: int,
     plan: list[dict] | None = None,
     requisitos: list[dict] | None = None,
     blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
 ) -> dict:
     plan = plan or []
     requisitos = requisitos or []
+    minimos = minimos or []
     elegidas: list[dict] = []
-    creditos = 0
     evaluaciones = 0
 
     # 1) Materias obligatorias: la mejor sección compatible de cada una.
@@ -472,9 +513,8 @@ def horario_voraz(
         )
         for clase in opciones:
             evaluaciones += 1
-            if _puede_agregar(clase, elegidas, creditos, max_creditos, plan):
+            if _puede_agregar(clase, elegidas, plan):
                 elegidas.append(clase)
-                creditos += clase["creditos"]
                 break
         else:
             # Ninguna sección cabe: el voraz no puede cumplir el requisito.
@@ -491,10 +531,25 @@ def horario_voraz(
         evaluaciones += 1
         if _valor(clase, blandas) <= 0:
             continue
-        if not _puede_agregar(clase, elegidas, creditos, max_creditos, plan):
+        if not _puede_agregar(clase, elegidas, plan):
             continue
         elegidas.append(clase)
-        creditos += clase["creditos"]
+
+    # 3) Cotas mínimas (p. ej. min_creditos): si el horario se quedó corto, se
+    #    completa con las secciones restantes que quepan, aunque su valor sea <= 0
+    #    (una restricción dura pesa más que el valor). Si aun así no se alcanza,
+    #    el voraz no puede cumplirla (limitación de la heurística).
+    if not all(_cumple_minimo(elegidas, r) for r in minimos):
+        for clase in ordenadas:
+            if clase in elegidas:
+                continue
+            evaluaciones += 1
+            if _puede_agregar(clase, elegidas, plan):
+                elegidas.append(clase)
+                if all(_cumple_minimo(elegidas, r) for r in minimos):
+                    break
+        if not all(_cumple_minimo(elegidas, r) for r in minimos):
+            return _resultado("voraz", [], evaluaciones, blandas)
     return _resultado("voraz", elegidas, evaluaciones, blandas)
 
 
@@ -506,7 +561,6 @@ ESTRATEGIAS = {
 
 def resolver(
     estrategia: str,
-    max_creditos: int,
     nrcs: list[str] | None = None,
     restricciones: list[dict] | None = None,
 ) -> dict:
@@ -525,8 +579,11 @@ def resolver(
 
     candidatas, diagnostico = aplicar_filtros(candidatas, reglas)
     plan = [r for r in reglas if _clase(r) == "plan"]
+    minimos = [r for r in reglas if _clase(r) == "minimo"]
 
-    resultado = ESTRATEGIAS[estrategia](candidatas, max_creditos, plan, requisitos, blandas)
+    resultado = ESTRATEGIAS[estrategia](
+        candidatas, plan=plan, requisitos=requisitos, blandas=blandas, minimos=minimos
+    )
     resultado["restricciones_aplicadas"] = [describir_restriccion(r) for r in reglas]
     resultado["candidatas_iniciales"] = n_inicial
     resultado["candidatas_tras_filtros"] = len(candidatas)
@@ -545,6 +602,8 @@ def resolver(
             "qué restricción eliminó más NRC y considera relajarla. Si hay requisitos "
             "('incluir_materia' dura), revisa 'requisitos': puede que ninguna sección "
             "haya sobrevivido a los filtros o que no quepa con el resto del horario."
+            " Si usaste 'min_creditos', puede que las secciones disponibles no "
+            "alcancen ese mínimo sin conflictos."
         )
     return resultado
 
@@ -567,24 +626,24 @@ def listar_tipos_restriccion() -> dict:
 @mcp.tool()
 def armar_horario(
     estrategia: str = "voraz",
-    max_creditos: int = 30,
     nrcs: list[str] | None = None,
     restricciones: list[dict] | None = None,
 ) -> dict:
     """Arma un horario sin conflictos maximizando el valor total.
 
     estrategia: "fuerza_bruta" (óptima, lenta) o "voraz" (rápida, aproximada).
-    max_creditos: tope de créditos del horario.
     nrcs: NRC candidatos (si se omite, usa todas las clases del catálogo).
     restricciones: lista de restricciones del catálogo (ver listar_tipos_restriccion),
         por ejemplo {"tipo": "excluir_dias", "dureza": "dura", "dias": ["M", "J"]}.
+        El tope y el mínimo de créditos también son restricciones: "max_creditos" y
+        "min_creditos" (sin ninguna de las dos, los créditos no tienen límite).
     La respuesta incluye 'restricciones_aplicadas' (eco de lo interpretado) y
     'descartados_por_filtro' (qué NRC eliminó cada filtro) para ajustar si no hay solución.
     Con dureza "blanda" una restricción nunca descarta nada: solo suma o resta puntos
     según 'peso' (0 a 1, por omisión 0.5). 'incluir_materia' con dureza "dura" obliga a
     que el horario tenga esa materia ('requisitos' indica cuántas secciones sobreviven).
     """
-    return resolver(estrategia, max_creditos, nrcs, restricciones)
+    return resolver(estrategia, nrcs, restricciones)
 
 if __name__ == "__main__":
     mcp.run()
