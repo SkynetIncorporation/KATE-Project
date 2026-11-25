@@ -1,6 +1,14 @@
 const $ = id => document.getElementById(id);
-const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const estrellas = e => "★".repeat(Math.round(e)) + "☆".repeat(5 - Math.round(e));
+
+/* Calificaciones de SIIAPP: nombre del profesor, tal como sale en el catálogo -> estrellas.
+   Por ahora está vacío; puedes llenar algunos para la demo, ej. {"VERA SORIA, FRANCISCO": 4.5} */
+const ESTRELLAS = {};
+
+/* Catálogo real exportado de clases_stub.py */
+let CATALOGO = [];
+const cargado = fetch("catalogo.json").then(r => r.json()).then(d => { CATALOGO = d; }).catch(() => {});
 
 /* ---------- Navegación entre vistas (#chat, #ranking, #malla) ---------- */
 const VISTAS = ["chat", "ranking", "malla"];
@@ -12,38 +20,49 @@ function ruta() {
 }
 addEventListener("hashchange", ruta);
 
-/* ---------- Chat simulado: las respuestas son de ejemplo ---------- */
-const PLANES = [
-  {nombre:"Plan A: mejores profesores", sacrifica:"un hueco de 3 horas los martes y jueves",
-   clases:[
-    {m:"Análisis de algoritmos", p:"Dra. Hernández", e:4.7, d:["L","I"],     h:[9,11],  cr:8},
-    {m:"Cálculo diferencial",    p:"Mtra. Ortega",   e:4.9, d:["M","J"],     h:[8,10],  cr:8},
-    {m:"Bases de datos",         p:"Dr. Villalobos", e:4.1, d:["M","J"],     h:[13,15], cr:8},
-    {m:"Física general",         p:"Dr. Medina",     e:4.4, d:["V"],         h:[9,12],  cr:8}]},
-  {nombre:"Plan B: sin huecos", sacrifica:"Estructuras de datos con un profesor de 3.2 estrellas",
-   clases:[
-    {m:"Análisis de algoritmos", p:"Dra. Hernández", e:4.7, d:["L","I"],     h:[9,11],  cr:8},
-    {m:"Cálculo diferencial",    p:"Mtra. Ortega",   e:4.9, d:["M","J"],     h:[9,11],  cr:8},
-    {m:"Estructuras de datos",   p:"Mtro. Salazar",  e:3.2, d:["M","J"],     h:[11,13], cr:8},
-    {m:"Física general",         p:"Dr. Medina",     e:4.4, d:["V"],         h:[9,12],  cr:8}]},
-];
-const EJEMPLOS = ["24 a 32 créditos, clases de 8:00 a 14:00",
-                  "Sin huecos entre materias y con buenos profesores",
-                  "Evita profesores con menos de 3.5 estrellas"];
-const DIAS = ["L", "M", "I", "J", "V"];   // L M I J V, como en SIIAU
-
-function pintaHorario(i) {
-  const p = PLANES[i];
-  let g = DIAS.map((d, k) => `<div class="dia" style="grid-column:${k + 2};grid-row:1">${d}</div>`).join("");
-  for (let x = 7; x < 20; x++) g += `<div class="hora" style="grid-column:1;grid-row:${x - 5}">${x}:00</div>`;
-  p.clases.forEach((c, k) => c.d.forEach(d => g +=
-    `<div class="bloque c${k % 4}" style="grid-column:${DIAS.indexOf(d) + 2};grid-row:${c.h[0] - 5}/${c.h[1] - 5}">
-       <strong>${c.m}</strong><br>${c.p} · ${c.e}★</div>`));
-  const cr = p.clases.reduce((s, c) => s + c.cr, 0);
-  $("panel").innerHTML = `<p><strong>${p.nombre}</strong> · ${cr} créditos</p>
-    <p class="sac">Se sacrifica: ${p.sacrifica}.</p><div class="horario">${g}</div>`;
+/* ---------- Utilidades de horario ---------- */
+const DIAS = ["L", "M", "I", "J", "V", "S"];            // como en SIIAU
+const aMin = h => { const [a, b] = h.split(":"); return +a * 60 + +b; };
+const rango = h => h.split("-").map(aMin);               // "13:00-14:55" -> [780, 895]
+const fmt = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
+function choca(a, b) {
+  if (!a.dias.some(d => b.dias.includes(d))) return false;
+  const [s1, e1] = rango(a.hora), [s2, e2] = rango(b.hora);
+  return s1 < e2 && s2 < e1;
 }
 
+/* Armado de ejemplo (voraz simple). El armado real lo hace el algoritmo de K.A.T.E. */
+function armaPlan(pool, orden, tope) {
+  const clases = [], claves = new Set(); let cr = 0;
+  for (const c of [...pool].sort(orden)) {
+    if (claves.has(c.clave) || cr + c.creditos > tope) continue;
+    if (clases.some(e => choca(e, c))) continue;
+    clases.push(c); claves.add(c.clave); cr += c.creditos;
+  }
+  return {clases, cr};
+}
+
+let ultimos = [];
+function pintaHorario(i) {
+  const p = ultimos[i];
+  let g = DIAS.map((d, k) => `<div class="dia" style="grid-column:${k + 2};grid-row:1">${d}</div>`).join("");
+  for (let h = 7; h < 21; h++) g += `<div class="hora" style="grid-column:1;grid-row:${(h - 7) * 2 + 2}/span 2">${h}:00</div>`;
+  p.clases.forEach((c, k) => {
+    const [s, e] = rango(c.hora);
+    const r1 = Math.max(2, Math.floor((s - 420) / 30) + 2), r2 = Math.min(30, Math.ceil((e - 420) / 30) + 2);
+    c.dias.forEach(d => { if (DIAS.includes(d)) g +=
+      `<div class="bloque c${k % 4}" style="grid-column:${DIAS.indexOf(d) + 2};grid-row:${r1}/${r2}">
+         <strong>${esc(c.materia)}</strong><br>${c.hora} · NRC ${c.nrc}</div>`; });
+  });
+  $("panel").innerHTML = `<p><strong>${p.nombre}</strong> · ${p.cr} créditos · ${p.clases.length} materias</p>
+    <p class="sac">Se sacrifica: ${p.sacrifica}.</p>
+    <p class="vacio">NRC: ${p.clases.map(c => c.nrc).join(", ")}</p><div class="horario">${g}</div>`;
+}
+
+/* ---------- Chat ---------- */
+const EJEMPLOS = ["24 a 32 créditos, clases de 8:00 a 14:00",
+                  "Sin huecos entre materias",
+                  "16 créditos, clases de 10:00 a 18:00"];
 function agrega(clase, html) {
   const d = document.createElement("div");
   d.className = "msg " + clase; d.innerHTML = html;
@@ -52,11 +71,27 @@ function agrega(clase, html) {
 function enviar(texto) {
   texto = texto.trim(); if (!texto) return;
   agrega("yo", `<p>${esc(texto)}</p>`); $("texto").value = "";
-  setTimeout(() => agrega("bot",
-    `<p>Armé dos planes. Cada uno sacrifica algo distinto:</p>` +
-    PLANES.map((p, i) => `<div class="plan"><strong>${p.nombre}</strong>
+  if (!CATALOGO.length) {
+    agrega("bot", "<p>No pude cargar el catálogo. Si abriste el archivo con doble clic, el navegador lo bloquea: usa la página publicada.</p>");
+    return;
+  }
+  const cm = texto.match(/(\d+)(?:\s*a\s*(\d+))?\s*cr/i), tope = cm ? +(cm[2] || cm[1]) : 24;
+  const vm = texto.match(/(\d{1,2}):\d\d\s*(?:a|-)\s*(\d{1,2}):\d\d/), v = vm ? [+vm[1] * 60, +vm[2] * 60] : [420, 1260];
+  const pool = CATALOGO.filter(c => c.disponibles > 0 && c.hora && c.dias.length &&
+                                    rango(c.hora)[0] >= v[0] && rango(c.hora)[1] <= v[1]);
+  const A = armaPlan(pool, (a, b) => rango(a.hora)[0] - rango(b.hora)[0], tope);
+  const B = armaPlan(pool, (a, b) => b.disponibles - a.disponibles, tope);
+  const tiempos = p => p.clases.flatMap(c => rango(c.hora));
+  A.nombre = "Plan A: clases más temprano";
+  A.sacrifica = `cupo justo, la sección con menos lugares tiene ${Math.min(...A.clases.map(c => c.disponibles))} disponibles`;
+  B.nombre = "Plan B: más cupo disponible";
+  B.sacrifica = `horario más disperso, de ${fmt(Math.min(...tiempos(B)))} a ${fmt(Math.max(...tiempos(B)))}`;
+  ultimos = [A, B].filter(p => p.clases.length);
+  if (!ultimos.length) { agrega("bot", "<p>No encontré secciones con cupo que cumplan eso. Prueba con un rango de horas más amplio.</p>"); return; }
+  agrega("bot", `<p>Demostración: armé ${ultimos.length} plan(es) con secciones reales del ciclo ${esc(CATALOGO[0].ciclo)}. Cada uno sacrifica algo distinto:</p>` +
+    ultimos.map((p, i) => `<div class="plan"><strong>${p.nombre}</strong>
       <p class="sac">Se sacrifica: ${p.sacrifica}.</p>
-      <button class="btn" type="button" data-plan="${i}">Ver horario</button></div>`).join("")), 500);
+      <button class="btn" type="button" data-plan="${i}">Ver horario</button></div>`).join(""));
 }
 $("mensajes").addEventListener("click", e => {
   const b = e.target.closest("[data-plan]"); if (b) pintaHorario(+b.dataset.plan);
@@ -66,19 +101,31 @@ $("texto").addEventListener("keydown", e => { if (e.key === "Enter") enviar($("t
 $("ejemplos").innerHTML = EJEMPLOS.map(t => `<button type="button">${t}</button>`).join("");
 $("ejemplos").addEventListener("click", e => { if (e.target.tagName === "BUTTON") enviar(e.target.textContent); });
 
-/* ---------- Ranking de profesores ---------- */
-DEPARTAMENTOS.forEach(d => $("r-depto").add(new Option(d, d)));
+/* ---------- Ranking de profesores (del catálogo real) ---------- */
 function pintaRanking() {
-  const q = $("r-materia").value.toLowerCase(), d = $("r-depto").value, asc = $("r-orden").value === "asc";
-  const l = PROFESORES.filter(p => p.m.toLowerCase().includes(q) && (!d || p.d === d))
-                      .sort((a, b) => asc ? a.e - b.e : b.e - a.e);
-  $("r-lista").innerHTML = l.length ? l.map(p => `<tr><td>${p.n}</td><td>${p.d}</td><td>${p.m}</td>
-    <td><span class="estrellas">${estrellas(p.e)}</span> ${p.e.toFixed(1)}</td><td>${p.r}</td></tr>`).join("")
-    : `<tr><td colspan="5">Ningún profesor coincide. Prueba con otra materia o departamento.</td></tr>`;
+  document.querySelector("#ranking thead").innerHTML =
+    "<tr><th>Profesor</th><th>Materias</th><th>Secciones</th><th>Calificación</th></tr>";
+  $("r-depto").parentElement.style.display = "none";    // el catálogo no trae departamento
+  if (!CATALOGO.length) { $("r-lista").innerHTML = `<tr><td colspan="4">No se pudo cargar el catálogo.</td></tr>`; return; }
+  const q = $("r-materia").value.toLowerCase(), asc = $("r-orden").value === "asc", m = new Map();
+  CATALOGO.forEach(c => (c.profesores || [c.profesor]).filter(Boolean).forEach(n => {
+    const o = m.get(n) || {n, materias: new Set(), sec: 0};
+    o.materias.add(c.materia); o.sec++; m.set(n, o);
+  }));
+  const e = p => ESTRELLAS[p.n];
+  const l = [...m.values()].filter(p => !q || [...p.materias].some(x => x.toLowerCase().includes(q)))
+    .sort((a, b) => e(a) == null || e(b) == null
+      ? (e(a) == null) - (e(b) == null) || a.n.localeCompare(b.n)
+      : asc ? e(a) - e(b) : e(b) - e(a));
+  $("r-lista").innerHTML = l.length ? l.map(p => {
+    const ms = [...p.materias];
+    return `<tr><td>${esc(p.n)}</td><td>${esc(ms.slice(0, 3).join(", "))}${ms.length > 3 ? ` (+${ms.length - 3})` : ""}</td>
+      <td>${p.sec}</td><td>${e(p) != null ? `<span class="estrellas">${estrellas(e(p))}</span> ${e(p).toFixed(1)}` : "Sin calificación"}</td></tr>`;
+  }).join("") : `<tr><td colspan="4">Ningún profesor coincide. Prueba con otra materia.</td></tr>`;
 }
-["r-materia", "r-depto", "r-orden"].forEach(id => $(id).addEventListener("input", pintaRanking));
+["r-materia", "r-orden"].forEach(id => $(id).addEventListener("input", pintaRanking));
 
-/* ---------- Malla curricular ---------- */
+/* ---------- Malla curricular (sigue con datos de ejemplo de datos.js) ---------- */
 CARRERAS.forEach(c => $("m-carrera").add(new Option(c.nombre, c.id)));
 [1, 2, 3, 4].forEach(n => $("m-ciclo").add(new Option("Ciclo " + n, n)));
 function pintaMalla() {
@@ -90,4 +137,4 @@ function pintaMalla() {
 }
 ["m-carrera", "m-ciclo", "m-texto"].forEach(id => $(id).addEventListener("input", pintaMalla));
 
-ruta(); pintaRanking(); pintaMalla();
+ruta(); pintaMalla(); cargado.then(pintaRanking);
