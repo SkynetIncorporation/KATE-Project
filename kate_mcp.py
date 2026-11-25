@@ -28,6 +28,21 @@ ESCALA_PREFERENCIA = 20.0
 # Distancia (en minutos) a partir de la cual "preferir_hora" ya no bonifica.
 DIST_MAX_MIN = 360
 
+# Niveles de importancia que Claude asigna según el tono del usuario. Cada nivel
+# es un multiplicador del peso (puntos = peso * ESCALA_PREFERENCIA). Son discretos
+# a propósito: así las corridas son reproducibles y comparables.
+# "casi_obligatoria" vale 50 * 20 = 1000 puntos: supera cualquier ganancia posible
+# de una sección, así que solo se viola si una restricción DURA lo obliga.
+IMPORTANCIAS: dict[str, float] = {
+    "ligera": 0.25,
+    "normal": 0.5,
+    "fuerte": 1.0,
+    "casi_obligatoria": 50.0,
+}
+# Una preferencia parcial (preferir_hora) se reporta como violación si cumple
+# menos de esta fracción de su bonificación máxima.
+UMBRAL_CUMPLIMIENTO = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de tiempo y texto
@@ -67,7 +82,9 @@ def _norm(texto: str) -> str:
 #   categoria "preferencia": solo existe como blanda.
 # Dureza "dura": invalida (filtro, plan, requisito). Dureza "blanda": nunca invalida;
 # suma o resta hasta peso * ESCALA_PREFERENCIA puntos al valor de cada sección.
-# En las blandas, "peso" (0 < peso <= 1) es opcional y vale 0.5 por omisión.
+# En las blandas, "importancia" (ligera | normal | fuerte | casi_obligatoria) fija el
+# peso desde el tono del usuario. Alternativa: "peso" numérico (0 < peso <= 1);
+# no se pueden dar ambos. Sin ninguno, el peso vale 0.5 (= "normal").
 # ---------------------------------------------------------------------------
 
 TIPOS_RESTRICCION: dict[str, dict] = {
@@ -157,7 +174,10 @@ TIPOS_RESTRICCION: dict[str, dict] = {
             "(la bonificación baja linealmente hasta 0 a 6 h de distancia)."
         ),
         "campos": {"hora": "HH:MM"},
-        "ejemplo": {"tipo": "preferir_hora", "dureza": "blanda", "hora": "15:00", "peso": 0.7},
+        "ejemplo": {
+            "tipo": "preferir_hora", "dureza": "blanda", "hora": "15:00",
+            "importancia": "fuerte",
+        },
     },
 }
 
@@ -226,10 +246,27 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
             _a_minutos(r["hora"])  # lanza ValueError si el formato es inválido
             n["hora"] = r["hora"]
         if dureza == "blanda":
-            peso = float(r.get("peso", 0.5))
-            if not 0 < peso <= 1:
-                raise ValueError(f"{tipo}: 'peso' debe estar en el rango (0, 1].")
-            n["peso"] = peso
+            if "importancia" in r and "peso" in r:
+                raise ValueError(f"{tipo}: usa 'importancia' o 'peso', no ambos.")
+            if "importancia" in r:
+                importancia = str(r["importancia"]).lower()
+                if importancia not in IMPORTANCIAS:
+                    raise ValueError(
+                        f"{tipo}: importancia {r['importancia']!r} desconocida. "
+                        f"Usa una de {list(IMPORTANCIAS)}."
+                    )
+                n["importancia"] = importancia
+                n["peso"] = IMPORTANCIAS[importancia]
+            else:
+                peso = float(r.get("peso", 0.5))
+                if not 0 < peso <= 1:
+                    raise ValueError(f"{tipo}: 'peso' debe estar en el rango (0, 1].")
+                n["peso"] = peso
+        elif "importancia" in r:
+            raise ValueError(
+                f"{tipo}: 'importancia' solo aplica a restricciones blandas; "
+                "una restricción dura no tiene niveles."
+            )
         normalizadas.append(n)
     maximos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "max_creditos"]
     minimos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "min_creditos"]
@@ -271,7 +308,9 @@ def describir_restriccion(r: dict) -> str:
     """Eco legible de una restricción; las blandas se marcan con su peso."""
     texto = _describir_base(r)
     if r["dureza"] == "blanda":
-        return f"{texto} (preferencia blanda, peso {r['peso']:g})"
+        nivel = r.get("importancia")
+        etiqueta = f"importancia {nivel}" if nivel else f"peso {r['peso']:g}"
+        return f"{texto} (preferencia blanda, {etiqueta})"
     return texto
 
 
@@ -349,6 +388,40 @@ def _bono_blanda(clase: dict, r: dict) -> float:
         return puntos if _coincide_materia(clase, r) else 0.0
     # Filtro blando: penaliza a la sección que lo incumple, sin descartarla.
     return 0.0 if _cumple_filtro(clase, r) else -puntos
+
+
+def _violaciones(elegidas: list[dict], blandas: list[dict] | None) -> list[dict]:
+    """Preferencias blandas que el horario incumple (total o parcialmente).
+
+    Cada entrada dice qué restricción, en qué NRC y cuántos puntos costó; es lo que
+    Claude necesita para explicar los tradeoffs de un plan.
+    """
+    resultado: list[dict] = []
+    for r in blandas or []:
+        puntos = r["peso"] * ESCALA_PREFERENCIA
+        texto = describir_restriccion(r)
+        if r["tipo"] == "incluir_materia":
+            if not any(_coincide_materia(c, r) for c in elegidas):
+                resultado.append({
+                    "restriccion": texto, "nrc": None, "materia": r["materia"],
+                    "costo": round(puntos, 2),
+                })
+        elif r["tipo"] == "preferir_hora":
+            for c in elegidas:
+                bono = _bono_blanda(c, r)
+                if bono < UMBRAL_CUMPLIMIENTO * puntos:
+                    resultado.append({
+                        "restriccion": texto, "nrc": c["nrc"], "materia": c["materia"],
+                        "costo": round(puntos - bono, 2),
+                    })
+        else:
+            for c in elegidas:
+                if not _cumple_filtro(c, r):
+                    resultado.append({
+                        "restriccion": texto, "nrc": c["nrc"], "materia": c["materia"],
+                        "costo": round(puntos, 2),
+                    })
+    return resultado
 
 
 def aplicar_filtros(
@@ -432,6 +505,7 @@ def _resultado(
 ) -> dict:
     base = sum(valor_clase(c) for c in elegidas)
     total = sum(_valor(c, blandas) for c in elegidas)
+    violaciones = _violaciones(elegidas, blandas)
     return {
         "estrategia": estrategia,
         "nrcs": [c["nrc"] for c in elegidas],
@@ -441,6 +515,8 @@ def _resultado(
         "valor_preferencias": round(total - base, 2),
         "creditos_total": sum(c["creditos"] for c in elegidas),
         "evaluaciones": evaluaciones,
+        "violaciones": violaciones,
+        "costo_violaciones": round(sum(v["costo"] for v in violaciones), 2),
     }
 
 
@@ -642,6 +718,15 @@ def armar_horario(
     Con dureza "blanda" una restricción nunca descarta nada: solo suma o resta puntos
     según 'peso' (0 a 1, por omisión 0.5). 'incluir_materia' con dureza "dura" obliga a
     que el horario tenga esa materia ('requisitos' indica cuántas secciones sobreviven).
+    TONO DEL USUARIO: la dureza la decide el CONTENIDO ("no puedo", "nunca", una razón
+    concreta como trabajo o transporte => "dura"); la importancia de una restricción
+    "blanda" la decide el TONO, con el campo 'importancia': "ligera" ("si se puede",
+    "me da igual"), "normal" (sin énfasis), "fuerte" ("de verdad prefiero", "evita")
+    o "casi_obligatoria" ("lo necesito", "no quiero ni verlo"; solo se viola si una
+    restricción dura lo obliga). No uses 'importancia' en restricciones duras y no la
+    mezcles con 'peso'. Si dudas entre dura y blanda, pregunta al usuario.
+    'violaciones' lista qué preferencias blandas quedaron incumplidas, en qué NRC y
+    cuántos puntos costó: úsala para explicar los tradeoffs de cada plan.
     """
     return resolver(estrategia, nrcs, restricciones)
 
