@@ -1,0 +1,8 @@
+name = "kate-gemini-proxy"
+main = "index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Origen exacto de tu página publicada (sin ruta final), p. ej. https://skynetincorporation.github.io
+ALLOWED_ORIGIN = "https://CAMBIA-ESTO.github.io"
+GEMINI_MODEL = "gemini-2.5-flash"

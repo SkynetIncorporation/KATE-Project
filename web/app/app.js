@@ -75,15 +75,23 @@ function agrega(clase, html) {
   d.className = "msg " + clase; d.innerHTML = html;
   $("mensajes").appendChild(d); $("mensajes").scrollTop = $("mensajes").scrollHeight;
 }
-function enviar(texto) {
+async function enviar(texto) {
   texto = texto.trim(); if (!texto) return;
   agrega("yo", `<p>${esc(texto)}</p>`); $("texto").value = "";
   if (!CATALOGO.length) {
     agrega("bot", "<p>No pude cargar el catálogo. Si abriste el archivo con doble clic, el navegador lo bloquea: usa la página publicada.</p>");
     return;
   }
-  const cm = texto.match(/(\d+)(?:\s*a\s*(\d+))?\s*cr/i), tope = cm ? +(cm[2] || cm[1]) : 24;
-  const vm = texto.match(/(\d{1,2}):\d\d\s*(?:a|-)\s*(\d{1,2}):\d\d/), v = vm ? [+vm[1] * 60, +vm[2] * 60] : [420, 1260];
+  let tope = 24, v = [420, 1260], nota = "";
+  const ia = await interpretaConGemini(texto);
+  if (ia) {
+    if (ia.creditos_max) tope = ia.creditos_max;
+    if (ia.hora_inicio && ia.hora_fin) v = [aMin(ia.hora_inicio), aMin(ia.hora_fin)];
+    nota = ia.respuesta ? `<p>${esc(ia.respuesta)}</p>` : "";
+  } else {   // respaldo sin IA
+    const cm = texto.match(/(\d+)(?:\s*a\s*(\d+))?\s*cr/i); if (cm) tope = +(cm[2] || cm[1]);
+    const vm = texto.match(/(\d{1,2}):\d\d\s*(?:a|-)\s*(\d{1,2}):\d\d/); if (vm) v = [+vm[1] * 60, +vm[2] * 60];
+  }
   const pool = CATALOGO.filter(c => c.disponibles > 0 && c.hora && c.dias.length &&
                                     rango(c.hora)[0] >= v[0] && rango(c.hora)[1] <= v[1]);
   const A = armaPlan(pool, (a, b) => rango(a.hora)[0] - rango(b.hora)[0], tope);
@@ -95,7 +103,7 @@ function enviar(texto) {
   B.sacrifica = `horario más disperso, de ${fmt(Math.min(...tiempos(B)))} a ${fmt(Math.max(...tiempos(B)))}`;
   ultimos = [A, B].filter(p => p.clases.length);
   if (!ultimos.length) { agrega("bot", "<p>No encontré secciones con cupo que cumplan eso. Prueba con un rango de horas más amplio.</p>"); return; }
-  agrega("bot", `<p>Demostración: armé ${ultimos.length} plan(es) con secciones reales del ciclo ${esc(CATALOGO[0].ciclo)}. Cada uno sacrifica algo distinto:</p>` +
+  agrega("bot", nota + `<p>Armé ${ultimos.length} plan(es) con secciones reales del ciclo ${esc(CATALOGO[0].ciclo)}. Cada uno sacrifica algo distinto:</p>` +
     ultimos.map((p, i) => `<div class="plan"><strong>${p.nombre}</strong>
       <p class="sac">Se sacrifica: ${p.sacrifica}.</p>
       <button class="btn" type="button" data-plan="${i}">Ver horario</button></div>`).join(""));
