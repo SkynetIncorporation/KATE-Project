@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K.A.T.E. · Asistente de horarios</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700&family=Public+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+<header class="barra">
+  <a class="marca" href="#chat">K.A.T.E.</a>
+  <nav aria-label="Secciones">
+    <a href="#chat" data-vista="chat">Asistente</a>
+    <a href="#ranking" data-vista="ranking">Ranking de profesores</a>
+    <a href="#malla" data-vista="malla">Malla curricular</a>
+  </nav>
+</header>
+
+<main>
+  <!-- Vista 1: chat + horario -->
+  <section id="chat" class="vista">
+    <h1>¿Qué horario necesitas?</h1>
+    <p class="nota">Interfaz de demostración: las respuestas y los datos son de ejemplo.</p>
+    <div class="atajos">
+      <a class="btn" href="#ranking">Ranking de profesores</a>
+      <a class="btn" href="#malla">Malla curricular</a>
+    </div>
+    <div class="chat-grid">
+      <div class="conv">
+        <div id="mensajes" class="mensajes" aria-live="polite">
+          <div class="msg bot"><p>Cuéntame cuántos créditos quieres, en qué horas puedes y si aceptas huecos entre clases. Yo propongo opciones y te digo qué se sacrifica en cada una.</p></div>
+        </div>
+        <div class="ejemplos" id="ejemplos"></div>
+        <div class="entrada">
+          <input id="texto" type="text" placeholder="Ej. 24 créditos, clases de 8:00 a 14:00" aria-label="Escribe tu mensaje">
+          <button class="btn primario" id="enviar" type="button">Enviar</button>
+        </div>
+      </div>
+      <aside class="panel" aria-label="Horario propuesto">
+        <h2>Tu horario</h2>
+        <div id="panel"><p class="vacio">Pide un horario en el chat y aquí aparece el plan que elijas.</p></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Vista 2: ranking de profesores -->
+  <section id="ranking" class="vista" hidden>
+    <h1>Ranking de profesores</h1>
+    <p class="nota">Calificación en estrellas tomada de SIIAPP (datos de ejemplo).</p>
+    <div class="filtros">
+      <label>Materia <input id="r-materia" type="search" placeholder="Buscar materia"></label>
+      <label>Departamento <select id="r-depto"><option value="">Todos</option></select></label>
+      <label>Orden <select id="r-orden">
+        <option value="desc">Mejor calificación primero</option>
+        <option value="asc">Peor calificación primero</option></select></label>
+    </div>
+    <div class="tabla"><table>
+      <thead><tr><th>Profesor</th><th>Departamento</th><th>Materia</th><th>Calificación</th><th>Reseñas</th></tr></thead>
+      <tbody id="r-lista"></tbody></table></div>
+  </section>
+
+  <!-- Vista 3: malla curricular -->
+  <section id="malla" class="vista" hidden>
+    <h1>Malla curricular</h1>
+    <p class="nota">Catálogo de materias por carrera (datos de ejemplo).</p>
+    <div class="filtros">
+      <label>Carrera <select id="m-carrera"></select></label>
+      <label>Ciclo <select id="m-ciclo"><option value="">Todos</option></select></label>
+      <label>Materia o clave <input id="m-texto" type="search" placeholder="Buscar"></label>
+    </div>
+    <div class="tabla"><table>
+      <thead><tr><th>Ciclo</th><th>Clave</th><th>Materia</th><th>Créditos</th><th>Prerrequisitos</th></tr></thead>
+      <tbody id="m-lista"></tbody></table></div>
+  </section>
+</main>
+
+<script src="datos.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
