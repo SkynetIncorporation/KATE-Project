@@ -3,12 +3,19 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":
 const estrellas = e => "★".repeat(Math.round(e)) + "☆".repeat(5 - Math.round(e));
 
 /* Calificaciones de SIIAPP: nombre del profesor, tal como sale en el catálogo -> estrellas.
-   Por ahora está vacío; puedes llenar algunos para la demo, ej. {"VERA SORIA, FRANCISCO": 4.5} */
+   Por ahora está vacío. Ej.: {"VERA SORIA, FRANCISCO": 4.5} */
 const ESTRELLAS = {};
 
-/* Catálogo real exportado de clases_stub.py */
+/* Catálogo real (catalogo.json) y reseñas de estudiantes (resenas.json) */
 let CATALOGO = [];
-const cargado = fetch("catalogo.json").then(r => r.json()).then(d => { CATALOGO = d; }).catch(() => {});
+let RESENAS = [];
+const POR = new Map();
+const cargado = Promise.all([
+  fetch("catalogo.json").then(r => r.json()).then(d => { CATALOGO = d; }).catch(() => {}),
+  fetch("resenas.json").then(r => r.json()).then(d => {
+    RESENAS = d; d.forEach(r => POR.set(r.k, [...(POR.get(r.k) || []), r]));
+  }).catch(() => {})   // si el archivo no existe, la página funciona sin reseñas
+]);
 
 /* ---------- Navegación entre vistas (#chat, #ranking, #malla) ---------- */
 const VISTAS = ["chat", "ranking", "malla"];
@@ -101,40 +108,62 @@ $("texto").addEventListener("keydown", e => { if (e.key === "Enter") enviar($("t
 $("ejemplos").innerHTML = EJEMPLOS.map(t => `<button type="button">${t}</button>`).join("");
 $("ejemplos").addEventListener("click", e => { if (e.target.tagName === "BUTTON") enviar(e.target.textContent); });
 
-/* ---------- Ranking de profesores (del catálogo real) ---------- */
+/* ---------- Ranking de profesores (catálogo real + reseñas) ---------- */
+const norm = s => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/\s+/g, " ").trim();
+const resenasDe = n => POR.get(norm(n)) || [];
+const nombreMateria = cl => { for (const c of CARRERAS) for (const m of c.materias) if (m[1] === cl) return m[2]; return cl; };
 function pintaRanking() {
   document.querySelector("#ranking thead").innerHTML =
-    "<tr><th>Profesor</th><th>Materias</th><th>Secciones</th><th>Calificación</th></tr>";
+    "<tr><th>Profesor</th><th>Materias</th><th>Secciones</th><th>Calificación</th><th>Acerca del profesor</th></tr>";
   $("r-depto").parentElement.style.display = "none";    // el catálogo no trae departamento
-  if (!CATALOGO.length) { $("r-lista").innerHTML = `<tr><td colspan="4">No se pudo cargar el catálogo.</td></tr>`; return; }
+  if (!CATALOGO.length) { $("r-lista").innerHTML = `<tr><td colspan="5">No se pudo cargar el catálogo.</td></tr>`; return; }
   const q = $("r-materia").value.toLowerCase(), asc = $("r-orden").value === "asc", m = new Map();
   CATALOGO.forEach(c => (c.profesores || [c.profesor]).filter(Boolean).forEach(n => {
     const o = m.get(n) || {n, materias: new Set(), sec: 0};
     o.materias.add(c.materia); o.sec++; m.set(n, o);
   }));
-  const e = p => ESTRELLAS[p.n];
+  const e = p => ESTRELLAS[p.n], rv = p => resenasDe(p.n).length;
   const l = [...m.values()].filter(p => !q || [...p.materias].some(x => x.toLowerCase().includes(q)))
     .sort((a, b) => e(a) == null || e(b) == null
-      ? (e(a) == null) - (e(b) == null) || a.n.localeCompare(b.n)
+      ? (e(a) == null) - (e(b) == null) || rv(b) - rv(a) || a.n.localeCompare(b.n)
       : asc ? e(a) - e(b) : e(b) - e(a));
   $("r-lista").innerHTML = l.length ? l.map(p => {
-    const ms = [...p.materias];
+    const ms = [...p.materias], rs = resenasDe(p.n);
     return `<tr><td>${esc(p.n)}</td><td>${esc(ms.slice(0, 3).join(", "))}${ms.length > 3 ? ` (+${ms.length - 3})` : ""}</td>
-      <td>${p.sec}</td><td>${e(p) != null ? `<span class="estrellas">${estrellas(e(p))}</span> ${e(p).toFixed(1)}` : "Sin calificación"}</td></tr>`;
-  }).join("") : `<tr><td colspan="4">Ningún profesor coincide. Prueba con otra materia.</td></tr>`;
+      <td>${p.sec}</td><td>${e(p) != null ? `<span class="estrellas">${estrellas(e(p))}</span> ${e(p).toFixed(1)}` : "Sin calificación"}</td>
+      <td>${rs.length ? `<button class="btn" type="button" data-acerca>Acerca del profesor (${rs.length})</button>` : "Sin reseñas"}</td></tr>
+      ${rs.length ? `<tr class="acerca" hidden><td colspan="5">${rs.map(r =>
+        `<p><strong>${esc(nombreMateria(r.c))}</strong> (${r.c})<br>${esc(r.t)}</p>`).join("")}
+        <p class="vacio">Opiniones de estudiantes recopiladas por Acción U (ciclo 2026A); no son calificaciones oficiales.</p></td></tr>` : ""}`;
+  }).join("") : `<tr><td colspan="5">Ningún profesor coincide. Prueba con otra materia.</td></tr>`;
 }
+$("r-lista").addEventListener("click", ev => {
+  const b = ev.target.closest("[data-acerca]");
+  if (b) { const r = b.closest("tr").nextElementSibling; r.hidden = !r.hidden; }
+});
 ["r-materia", "r-orden"].forEach(id => $(id).addEventListener("input", pintaRanking));
 
-/* ---------- Malla curricular (sigue con datos de ejemplo de datos.js) ---------- */
+/* ---------- Malla curricular (datos.js) cruzada con el catálogo ---------- */
 CARRERAS.forEach(c => $("m-carrera").add(new Option(c.nombre, c.id)));
-[1, 2, 3, 4].forEach(n => $("m-ciclo").add(new Option("Ciclo " + n, n)));
+function llenaSemestres() {
+  const c = CARRERAS.find(x => x.id === $("m-carrera").value);
+  const sems = [...new Set(c.materias.map(m => m[0]))].sort((a, b) => a - b);
+  $("m-ciclo").innerHTML = '<option value="">Todos</option>' +
+    sems.map(s => `<option value="${s}">${s > 9 ? "Optativas" : "Semestre " + s}</option>`).join("");
+}
 function pintaMalla() {
-  const c = CARRERAS.find(x => x.id === $("m-carrera").value), ciclo = $("m-ciclo").value,
+  const c = CARRERAS.find(x => x.id === $("m-carrera").value), sem = $("m-ciclo").value,
         q = $("m-texto").value.toLowerCase();
-  const l = c.materias.filter(m => (!ciclo || m[0] == ciclo) && (m[1] + " " + m[2]).toLowerCase().includes(q));
-  $("m-lista").innerHTML = l.length ? l.map(m => `<tr>${m.map(v => `<td>${v}</td>`).join("")}</tr>`).join("")
+  const l = c.materias.filter(m => (!sem || m[0] == sem) && (m[1] + " " + m[2]).toLowerCase().includes(q));
+  const n = k => k ? CATALOGO.filter(x => x.clave === k).length : 0;   // secciones en el catálogo
+  $("m-lista").innerHTML = l.length ? l.map(m => `<tr><td>${m[0] > 9 ? "Opt." : m[0]}</td><td>${esc(m[1] || "—")}</td>
+      <td>${esc(m[2])}</td><td>${m[3]}</td><td>${n(m[1]) || "—"}</td></tr>`).join("")
     : `<tr><td colspan="5">No hay materias con esos filtros.</td></tr>`;
 }
-["m-carrera", "m-ciclo", "m-texto"].forEach(id => $(id).addEventListener("input", pintaMalla));
+$("m-carrera").addEventListener("input", () => { llenaSemestres(); pintaMalla(); });
+["m-ciclo", "m-texto"].forEach(id => $(id).addEventListener("input", pintaMalla));
 
-ruta(); pintaMalla(); cargado.then(pintaRanking);
+llenaSemestres();
+pintaMalla();
+ruta();
+cargado.then(() => { pintaRanking(); pintaMalla(); });
