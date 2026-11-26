@@ -629,9 +629,149 @@ def horario_voraz(
     return _resultado("voraz", elegidas, evaluaciones, blandas)
 
 
+# ---------------------------------------------------------------------------
+# Estrategia 3: backtracking con poda (branch & bound). Óptima.
+#
+# Cada nodo del árbol es un horario parcial; sus hijos agregan una sección más
+# (en orden fijo, sin repetir subconjuntos). Dos tipos de poda:
+#   - Factibilidad (siempre): solo se extienden ramas donde la sección nueva no
+#     choca con las ya elegidas ni rompe una restricción de plan (monótonas), y
+#     se corta si un requisito o un mínimo de créditos ya es inalcanzable.
+#   - Cota (poda_cota=True): se corta si el valor actual más el máximo que aún
+#     se podría sumar (a lo más una sección por materia, solo valores > 0) no
+#     supera al mejor horario encontrado. La cota es admisible, así que nunca
+#     descarta el óptimo.
+# Peor caso O(2^n), pero en la práctica explora una fracción de los nodos.
+# ---------------------------------------------------------------------------
+
+# Tope de nodos para que una instancia enorme no cuelgue la herramienta MCP.
+# Si se alcanza, se devuelve el mejor horario hallado con optimo_garantizado=False.
+MAX_NODOS_BACKTRACKING = 500_000
+
+
+class _LimiteNodos(Exception):
+    """Se alcanzó MAX_NODOS_BACKTRACKING."""
+
+
+def horario_backtracking(
+    candidatas: list[dict],
+    plan: list[dict] | None = None,
+    requisitos: list[dict] | None = None,
+    blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
+    poda_cota: bool = True,
+) -> dict:
+    plan = plan or []
+    requisitos = requisitos or []
+    minimos = minimos or []
+    nombre = "backtracking" if poda_cota else "backtracking_sin_cota"
+
+    # Orden por valor/crédito: la primera ruta en profundidad imita al voraz y da
+    # una buena cota inferior desde el inicio.
+    ordenadas = sorted(
+        candidatas,
+        key=lambda c: (-_valor(c, blandas) / max(c["creditos"], 1), c["nrc"]),
+    )
+    valores = [_valor(c, blandas) for c in ordenadas]
+    # Con requisitos o mínimos, una sección de valor <= 0 puede ser necesaria.
+    exigen_negativas = bool(requisitos or minimos)
+    est = {
+        "nodos": 0,
+        "podas_factibilidad": 0,
+        "podas_cota": 0,
+        "mejor": [],
+        "mejor_valor": float("-inf"),
+    }
+
+    def cumple_completo(elegidas: list[dict]) -> bool:
+        return all(
+            any(_coincide_materia(c, r) for c in elegidas) for r in requisitos
+        ) and all(_cumple_minimo(elegidas, r) for r in minimos)
+
+    def alcanzable(elegidas: list[dict], creditos: int, viables: list[int]) -> bool:
+        """False si ningún descendiente puede cumplir los requisitos o mínimos."""
+        for r in requisitos:
+            if not any(_coincide_materia(c, r) for c in elegidas) and not any(
+                _coincide_materia(ordenadas[j], r) for j in viables
+            ):
+                return False
+        if minimos:
+            por_clave: dict[str, int] = {}
+            for j in viables:
+                c = ordenadas[j]
+                por_clave[c["clave"]] = max(por_clave.get(c["clave"], 0), c["creditos"])
+            posibles = creditos + sum(por_clave.values())
+            if any(posibles < r["creditos"] for r in minimos):
+                return False
+        return True
+
+    def cota(valor: float, viables: list[int]) -> float:
+        """Cota superior: a lo más una sección por materia, solo valores positivos."""
+        mejor_por_clave: dict[str, float] = {}
+        for j in viables:
+            v = valores[j]
+            if v > mejor_por_clave.get(ordenadas[j]["clave"], 0.0):
+                mejor_por_clave[ordenadas[j]["clave"]] = v
+        return valor + sum(mejor_por_clave.values())
+
+    def explorar(elegidas: list[dict], valor: float, creditos: int, viables: list[int]) -> None:
+        est["nodos"] += 1
+        if est["nodos"] > MAX_NODOS_BACKTRACKING:
+            raise _LimiteNodos
+        if valor > est["mejor_valor"] and cumple_completo(elegidas):
+            est["mejor_valor"] = valor
+            est["mejor"] = list(elegidas)
+        if not alcanzable(elegidas, creditos, viables):
+            est["podas_factibilidad"] += 1
+            return
+        if poda_cota and cota(valor, viables) <= est["mejor_valor"]:
+            est["podas_cota"] += 1
+            return
+        for pos, j in enumerate(viables):
+            if poda_cota and valores[j] <= 0 and not exigen_negativas:
+                est["podas_cota"] += 1
+                continue
+            clase = ordenadas[j]
+            nuevas = elegidas + [clase]
+            resto = viables[pos + 1:]
+            siguientes = [k for k in resto if _puede_agregar(ordenadas[k], nuevas, plan)]
+            est["podas_factibilidad"] += len(resto) - len(siguientes)
+            explorar(nuevas, valor + valores[j], creditos + clase["creditos"], siguientes)
+
+    inicial = [j for j in range(len(ordenadas)) if _puede_agregar(ordenadas[j], [], plan)]
+    est["podas_factibilidad"] += len(ordenadas) - len(inicial)
+    completo = True
+    try:
+        explorar([], 0.0, 0, inicial)
+    except _LimiteNodos:
+        completo = False
+
+    resultado = _resultado(nombre, est["mejor"], est["nodos"], blandas)
+    resultado["nodos_explorados"] = est["nodos"]
+    resultado["podas_factibilidad"] = est["podas_factibilidad"]
+    resultado["podas_cota"] = est["podas_cota"]
+    resultado["optimo_garantizado"] = completo
+    return resultado
+
+
+def horario_backtracking_sin_cota(
+    candidatas: list[dict],
+    plan: list[dict] | None = None,
+    requisitos: list[dict] | None = None,
+    blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
+) -> dict:
+    """Backtracking que solo poda por factibilidad (para medir el efecto de la cota)."""
+    return horario_backtracking(
+        candidatas, plan, requisitos, blandas, minimos, poda_cota=False
+    )
+
+
 ESTRATEGIAS = {
     "fuerza_bruta": horario_fuerza_bruta,
     "voraz": horario_voraz,
+    "backtracking": horario_backtracking,
+    "backtracking_sin_cota": horario_backtracking_sin_cota,
 }
 
 
@@ -707,7 +847,10 @@ def armar_horario(
 ) -> dict:
     """Arma un horario sin conflictos maximizando el valor total.
 
-    estrategia: "fuerza_bruta" (óptima, lenta) o "voraz" (rápida, aproximada).
+    estrategia: "backtracking" (óptima, con poda por cota: la recomendada),
+        "fuerza_bruta" (óptima, solo n chico), "voraz" (rápida, aproximada) o
+        "backtracking_sin_cota" (óptima; solo poda por factibilidad, para comparar).
+        Si 'optimo_garantizado' es false, el backtracking llegó a su tope de nodos.
     nrcs: NRC candidatos (si se omite, usa todas las clases del catálogo).
     restricciones: lista de restricciones del catálogo (ver listar_tipos_restriccion),
         por ejemplo {"tipo": "excluir_dias", "dureza": "dura", "dias": ["M", "J"]}.
