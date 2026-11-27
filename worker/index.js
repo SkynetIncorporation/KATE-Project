@@ -37,6 +37,22 @@ export default {
     if (typeof texto !== "string" || !texto.trim() || texto.length > 500)
       return new Response("Mensaje inválido", { status: 400, headers: cors });
 
+    // Si el túnel hacia el backend (servidor MCP) está activo, se le reenvía el mensaje.
+    // Si no responde, se usa Gemini directo como respaldo.
+    const backend = await env.KATE_CONFIG?.get("BACKEND_URL");
+    if (backend && env.BACKEND_SECRET) {
+      try {
+        const rb = await fetch(`${backend}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Kate-Secret": env.BACKEND_SECRET },
+          body: JSON.stringify({ texto }),
+          signal: AbortSignal.timeout(25000)
+        });
+        if (rb.ok) return new Response(await rb.text(), { headers: { ...cors, "Content-Type": "application/json" } });
+        console.error(`Backend respondió ${rb.status}`);
+      } catch (e) { console.error(`Backend no disponible: ${e}`); }
+    }
+
     const modelo = env.GEMINI_MODEL || "gemini-3.8-flash";
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
       method: "POST",
