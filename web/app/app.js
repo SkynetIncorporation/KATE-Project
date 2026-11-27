@@ -30,11 +30,13 @@ addEventListener("hashchange", ruta);
 /* ---------- Utilidades de horario ---------- */
 const DIAS = ["L", "M", "I", "J", "V", "S"];            // como en SIIAU
 const aMin = h => { const [a, b] = h.split(":"); return +a * 60 + +b; };
-const rango = h => h.split("-").map(aMin);               // "13:00-14:55" -> [780, 895]
+const rango = h => (typeof h === "string" && h.includes("-")) ? h.split("-").map(aMin) : null;  // "13:00-14:55" -> [780, 895]; null si no hay hora
 const fmt = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
 function choca(a, b) {
   if (!a.dias.some(d => b.dias.includes(d))) return false;
-  const [s1, e1] = rango(a.hora), [s2, e2] = rango(b.hora);
+  const ra = rango(a.hora), rb = rango(b.hora);
+  if (!ra || !rb) return false;                           // sin horario no hay choque
+  const [s1, e1] = ra, [s2, e2] = rb;
   return s1 < e2 && s2 < e1;
 }
 
@@ -54,8 +56,11 @@ function pintaHorario(i) {
   const p = ultimos[i];
   let g = DIAS.map((d, k) => `<div class="dia" style="grid-column:${k + 2};grid-row:1">${d}</div>`).join("");
   for (let h = 7; h < 21; h++) g += `<div class="hora" style="grid-column:1;grid-row:${(h - 7) * 2 + 2}/span 2">${h}:00</div>`;
+  const sinHora = [];
   p.clases.forEach((c, k) => {
-    const [s, e] = rango(c.hora);
+    const r = rango(c.hora);
+    if (!r) { sinHora.push(c); return; }                  // secciones sin horario (hora null) no van en la cuadrícula
+    const [s, e] = r;
     const r1 = Math.max(2, Math.floor((s - 420) / 30) + 2), r2 = Math.min(30, Math.ceil((e - 420) / 30) + 2);
     c.dias.forEach(d => { if (DIAS.includes(d)) g +=
       `<div class="bloque c${k % 4}" style="grid-column:${DIAS.indexOf(d) + 2};grid-row:${r1}/${r2}">
@@ -64,6 +69,8 @@ function pintaHorario(i) {
   $("panel").innerHTML = `<p><strong>${p.nombre}</strong> · ${p.cr} créditos · ${p.clases.length} materias</p>
     <p class="sac">Se sacrifica: ${p.sacrifica}.</p>
     <p class="vacio">NRC: ${p.clases.map(c => c.nrc).join(", ")}</p><div class="horario">${g}</div>`;
+  if (sinHora.length) $("panel").insertAdjacentHTML("beforeend",
+    `<p class="vacio">Sin horario definido: ${sinHora.map(c => `${esc(c.materia)} (NRC ${c.nrc})`).join(", ")}</p>`);
 }
 
 /* ---------- Chat ---------- */
