@@ -1,5 +1,5 @@
 /* Cliente del chat hacia el proxy (worker/index.js). Si falla, app.js usa el análisis por regex. */
-const GEMINI_PROXY_URL = "https://kate-gemini-proxy.CAMBIA-ESTO.workers.dev";
+const GEMINI_PROXY_URL = "https://kate-gemini-proxy.skynetkate.workers.dev";
 
 async function interpretaConGemini(texto) {
   try {
