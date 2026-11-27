@@ -53,7 +53,7 @@ export default {
       } catch (e) { console.error(`Backend no disponible: ${e}`); }
     }
 
-    const modelo = env.GEMINI_MODEL || "gemini-3.8-flash";
+    const modelo = env.GEMINI_MODEL || "gemini-3.5-flash-lite";
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },

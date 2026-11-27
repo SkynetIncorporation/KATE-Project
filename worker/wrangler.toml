@@ -6,7 +6,7 @@ compatibility_date = "2026-11-01"
 # Origen exacto de tu página publicada (sin ruta final), p. ej. https://skynetincorporation.github.io
 ALLOWED_ORIGIN = "https://skynetincorporation.github.io"
 GEMINI_API_KEY = "AQ.Ab8RN6JfzKX6ZJVNQEnPTpc1TFVR-u47pKH2K4KWRFSEDVaxAw"
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 # Guarda BACKEND_URL (la URL actual del túnel); la actualiza scripts/tunel.sh
 [[kv_namespaces]]

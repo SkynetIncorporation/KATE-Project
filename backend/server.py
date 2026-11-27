@@ -66,7 +66,7 @@ def _cargar_env() -> None:
 
 
 _cargar_env()
-MODELO = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+MODELO = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 SECRETO = os.getenv("KATE_BACKEND_SECRET", "")
 
 
