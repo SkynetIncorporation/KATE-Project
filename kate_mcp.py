@@ -28,6 +28,21 @@ ESCALA_PREFERENCIA = 20.0
 # Distancia (en minutos) a partir de la cual "preferir_hora" ya no bonifica.
 DIST_MAX_MIN = 360
 
+# Niveles de importancia que Claude asigna según el tono del usuario. Cada nivel
+# es un multiplicador del peso (puntos = peso * ESCALA_PREFERENCIA). Son discretos
+# a propósito: así las corridas son reproducibles y comparables.
+# "casi_obligatoria" vale 50 * 20 = 1000 puntos: supera cualquier ganancia posible
+# de una sección, así que solo se viola si una restricción DURA lo obliga.
+IMPORTANCIAS: dict[str, float] = {
+    "ligera": 0.25,
+    "normal": 0.5,
+    "fuerte": 1.0,
+    "casi_obligatoria": 50.0,
+}
+# Una preferencia parcial (preferir_hora) se reporta como violación si cumple
+# menos de esta fracción de su bonificación máxima.
+UMBRAL_CUMPLIMIENTO = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de tiempo y texto
@@ -67,7 +82,9 @@ def _norm(texto: str) -> str:
 #   categoria "preferencia": solo existe como blanda.
 # Dureza "dura": invalida (filtro, plan, requisito). Dureza "blanda": nunca invalida;
 # suma o resta hasta peso * ESCALA_PREFERENCIA puntos al valor de cada sección.
-# En las blandas, "peso" (0 < peso <= 1) es opcional y vale 0.5 por omisión.
+# En las blandas, "importancia" (ligera | normal | fuerte | casi_obligatoria) fija el
+# peso desde el tono del usuario. Alternativa: "peso" numérico (0 < peso <= 1);
+# no se pueden dar ambos. Sin ninguno, el peso vale 0.5 (= "normal").
 # ---------------------------------------------------------------------------
 
 TIPOS_RESTRICCION: dict[str, dict] = {
@@ -157,7 +174,10 @@ TIPOS_RESTRICCION: dict[str, dict] = {
             "(la bonificación baja linealmente hasta 0 a 6 h de distancia)."
         ),
         "campos": {"hora": "HH:MM"},
-        "ejemplo": {"tipo": "preferir_hora", "dureza": "blanda", "hora": "15:00", "peso": 0.7},
+        "ejemplo": {
+            "tipo": "preferir_hora", "dureza": "blanda", "hora": "15:00",
+            "importancia": "fuerte",
+        },
     },
 }
 
@@ -226,10 +246,27 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
             _a_minutos(r["hora"])  # lanza ValueError si el formato es inválido
             n["hora"] = r["hora"]
         if dureza == "blanda":
-            peso = float(r.get("peso", 0.5))
-            if not 0 < peso <= 1:
-                raise ValueError(f"{tipo}: 'peso' debe estar en el rango (0, 1].")
-            n["peso"] = peso
+            if "importancia" in r and "peso" in r:
+                raise ValueError(f"{tipo}: usa 'importancia' o 'peso', no ambos.")
+            if "importancia" in r:
+                importancia = str(r["importancia"]).lower()
+                if importancia not in IMPORTANCIAS:
+                    raise ValueError(
+                        f"{tipo}: importancia {r['importancia']!r} desconocida. "
+                        f"Usa una de {list(IMPORTANCIAS)}."
+                    )
+                n["importancia"] = importancia
+                n["peso"] = IMPORTANCIAS[importancia]
+            else:
+                peso = float(r.get("peso", 0.5))
+                if not 0 < peso <= 1:
+                    raise ValueError(f"{tipo}: 'peso' debe estar en el rango (0, 1].")
+                n["peso"] = peso
+        elif "importancia" in r:
+            raise ValueError(
+                f"{tipo}: 'importancia' solo aplica a restricciones blandas; "
+                "una restricción dura no tiene niveles."
+            )
         normalizadas.append(n)
     maximos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "max_creditos"]
     minimos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "min_creditos"]
@@ -271,7 +308,9 @@ def describir_restriccion(r: dict) -> str:
     """Eco legible de una restricción; las blandas se marcan con su peso."""
     texto = _describir_base(r)
     if r["dureza"] == "blanda":
-        return f"{texto} (preferencia blanda, peso {r['peso']:g})"
+        nivel = r.get("importancia")
+        etiqueta = f"importancia {nivel}" if nivel else f"peso {r['peso']:g}"
+        return f"{texto} (preferencia blanda, {etiqueta})"
     return texto
 
 
@@ -349,6 +388,40 @@ def _bono_blanda(clase: dict, r: dict) -> float:
         return puntos if _coincide_materia(clase, r) else 0.0
     # Filtro blando: penaliza a la sección que lo incumple, sin descartarla.
     return 0.0 if _cumple_filtro(clase, r) else -puntos
+
+
+def _violaciones(elegidas: list[dict], blandas: list[dict] | None) -> list[dict]:
+    """Preferencias blandas que el horario incumple (total o parcialmente).
+
+    Cada entrada dice qué restricción, en qué NRC y cuántos puntos costó; es lo que
+    Claude necesita para explicar los tradeoffs de un plan.
+    """
+    resultado: list[dict] = []
+    for r in blandas or []:
+        puntos = r["peso"] * ESCALA_PREFERENCIA
+        texto = describir_restriccion(r)
+        if r["tipo"] == "incluir_materia":
+            if not any(_coincide_materia(c, r) for c in elegidas):
+                resultado.append({
+                    "restriccion": texto, "nrc": None, "materia": r["materia"],
+                    "costo": round(puntos, 2),
+                })
+        elif r["tipo"] == "preferir_hora":
+            for c in elegidas:
+                bono = _bono_blanda(c, r)
+                if bono < UMBRAL_CUMPLIMIENTO * puntos:
+                    resultado.append({
+                        "restriccion": texto, "nrc": c["nrc"], "materia": c["materia"],
+                        "costo": round(puntos - bono, 2),
+                    })
+        else:
+            for c in elegidas:
+                if not _cumple_filtro(c, r):
+                    resultado.append({
+                        "restriccion": texto, "nrc": c["nrc"], "materia": c["materia"],
+                        "costo": round(puntos, 2),
+                    })
+    return resultado
 
 
 def aplicar_filtros(
@@ -432,6 +505,7 @@ def _resultado(
 ) -> dict:
     base = sum(valor_clase(c) for c in elegidas)
     total = sum(_valor(c, blandas) for c in elegidas)
+    violaciones = _violaciones(elegidas, blandas)
     return {
         "estrategia": estrategia,
         "nrcs": [c["nrc"] for c in elegidas],
@@ -441,6 +515,8 @@ def _resultado(
         "valor_preferencias": round(total - base, 2),
         "creditos_total": sum(c["creditos"] for c in elegidas),
         "evaluaciones": evaluaciones,
+        "violaciones": violaciones,
+        "costo_violaciones": round(sum(v["costo"] for v in violaciones), 2),
     }
 
 
@@ -553,9 +629,149 @@ def horario_voraz(
     return _resultado("voraz", elegidas, evaluaciones, blandas)
 
 
+# ---------------------------------------------------------------------------
+# Estrategia 3: backtracking con poda (branch & bound). Óptima.
+#
+# Cada nodo del árbol es un horario parcial; sus hijos agregan una sección más
+# (en orden fijo, sin repetir subconjuntos). Dos tipos de poda:
+#   - Factibilidad (siempre): solo se extienden ramas donde la sección nueva no
+#     choca con las ya elegidas ni rompe una restricción de plan (monótonas), y
+#     se corta si un requisito o un mínimo de créditos ya es inalcanzable.
+#   - Cota (poda_cota=True): se corta si el valor actual más el máximo que aún
+#     se podría sumar (a lo más una sección por materia, solo valores > 0) no
+#     supera al mejor horario encontrado. La cota es admisible, así que nunca
+#     descarta el óptimo.
+# Peor caso O(2^n), pero en la práctica explora una fracción de los nodos.
+# ---------------------------------------------------------------------------
+
+# Tope de nodos para que una instancia enorme no cuelgue la herramienta MCP.
+# Si se alcanza, se devuelve el mejor horario hallado con optimo_garantizado=False.
+MAX_NODOS_BACKTRACKING = 500_000
+
+
+class _LimiteNodos(Exception):
+    """Se alcanzó MAX_NODOS_BACKTRACKING."""
+
+
+def horario_backtracking(
+    candidatas: list[dict],
+    plan: list[dict] | None = None,
+    requisitos: list[dict] | None = None,
+    blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
+    poda_cota: bool = True,
+) -> dict:
+    plan = plan or []
+    requisitos = requisitos or []
+    minimos = minimos or []
+    nombre = "backtracking" if poda_cota else "backtracking_sin_cota"
+
+    # Orden por valor/crédito: la primera ruta en profundidad imita al voraz y da
+    # una buena cota inferior desde el inicio.
+    ordenadas = sorted(
+        candidatas,
+        key=lambda c: (-_valor(c, blandas) / max(c["creditos"], 1), c["nrc"]),
+    )
+    valores = [_valor(c, blandas) for c in ordenadas]
+    # Con requisitos o mínimos, una sección de valor <= 0 puede ser necesaria.
+    exigen_negativas = bool(requisitos or minimos)
+    est = {
+        "nodos": 0,
+        "podas_factibilidad": 0,
+        "podas_cota": 0,
+        "mejor": [],
+        "mejor_valor": float("-inf"),
+    }
+
+    def cumple_completo(elegidas: list[dict]) -> bool:
+        return all(
+            any(_coincide_materia(c, r) for c in elegidas) for r in requisitos
+        ) and all(_cumple_minimo(elegidas, r) for r in minimos)
+
+    def alcanzable(elegidas: list[dict], creditos: int, viables: list[int]) -> bool:
+        """False si ningún descendiente puede cumplir los requisitos o mínimos."""
+        for r in requisitos:
+            if not any(_coincide_materia(c, r) for c in elegidas) and not any(
+                _coincide_materia(ordenadas[j], r) for j in viables
+            ):
+                return False
+        if minimos:
+            por_clave: dict[str, int] = {}
+            for j in viables:
+                c = ordenadas[j]
+                por_clave[c["clave"]] = max(por_clave.get(c["clave"], 0), c["creditos"])
+            posibles = creditos + sum(por_clave.values())
+            if any(posibles < r["creditos"] for r in minimos):
+                return False
+        return True
+
+    def cota(valor: float, viables: list[int]) -> float:
+        """Cota superior: a lo más una sección por materia, solo valores positivos."""
+        mejor_por_clave: dict[str, float] = {}
+        for j in viables:
+            v = valores[j]
+            if v > mejor_por_clave.get(ordenadas[j]["clave"], 0.0):
+                mejor_por_clave[ordenadas[j]["clave"]] = v
+        return valor + sum(mejor_por_clave.values())
+
+    def explorar(elegidas: list[dict], valor: float, creditos: int, viables: list[int]) -> None:
+        est["nodos"] += 1
+        if est["nodos"] > MAX_NODOS_BACKTRACKING:
+            raise _LimiteNodos
+        if valor > est["mejor_valor"] and cumple_completo(elegidas):
+            est["mejor_valor"] = valor
+            est["mejor"] = list(elegidas)
+        if not alcanzable(elegidas, creditos, viables):
+            est["podas_factibilidad"] += 1
+            return
+        if poda_cota and cota(valor, viables) <= est["mejor_valor"]:
+            est["podas_cota"] += 1
+            return
+        for pos, j in enumerate(viables):
+            if poda_cota and valores[j] <= 0 and not exigen_negativas:
+                est["podas_cota"] += 1
+                continue
+            clase = ordenadas[j]
+            nuevas = elegidas + [clase]
+            resto = viables[pos + 1:]
+            siguientes = [k for k in resto if _puede_agregar(ordenadas[k], nuevas, plan)]
+            est["podas_factibilidad"] += len(resto) - len(siguientes)
+            explorar(nuevas, valor + valores[j], creditos + clase["creditos"], siguientes)
+
+    inicial = [j for j in range(len(ordenadas)) if _puede_agregar(ordenadas[j], [], plan)]
+    est["podas_factibilidad"] += len(ordenadas) - len(inicial)
+    completo = True
+    try:
+        explorar([], 0.0, 0, inicial)
+    except _LimiteNodos:
+        completo = False
+
+    resultado = _resultado(nombre, est["mejor"], est["nodos"], blandas)
+    resultado["nodos_explorados"] = est["nodos"]
+    resultado["podas_factibilidad"] = est["podas_factibilidad"]
+    resultado["podas_cota"] = est["podas_cota"]
+    resultado["optimo_garantizado"] = completo
+    return resultado
+
+
+def horario_backtracking_sin_cota(
+    candidatas: list[dict],
+    plan: list[dict] | None = None,
+    requisitos: list[dict] | None = None,
+    blandas: list[dict] | None = None,
+    minimos: list[dict] | None = None,
+) -> dict:
+    """Backtracking que solo poda por factibilidad (para medir el efecto de la cota)."""
+    return horario_backtracking(
+        candidatas, plan, requisitos, blandas, minimos, poda_cota=False
+    )
+
+
 ESTRATEGIAS = {
     "fuerza_bruta": horario_fuerza_bruta,
     "voraz": horario_voraz,
+    "backtracking": horario_backtracking,
+    "backtracking_sin_cota": horario_backtracking_sin_cota,
 }
 
 
@@ -631,7 +847,10 @@ def armar_horario(
 ) -> dict:
     """Arma un horario sin conflictos maximizando el valor total.
 
-    estrategia: "fuerza_bruta" (óptima, lenta) o "voraz" (rápida, aproximada).
+    estrategia: "backtracking" (óptima, con poda por cota: la recomendada),
+        "fuerza_bruta" (óptima, solo n chico), "voraz" (rápida, aproximada) o
+        "backtracking_sin_cota" (óptima; solo poda por factibilidad, para comparar).
+        Si 'optimo_garantizado' es false, el backtracking llegó a su tope de nodos.
     nrcs: NRC candidatos (si se omite, usa todas las clases del catálogo).
     restricciones: lista de restricciones del catálogo (ver listar_tipos_restriccion),
         por ejemplo {"tipo": "excluir_dias", "dureza": "dura", "dias": ["M", "J"]}.
@@ -642,6 +861,15 @@ def armar_horario(
     Con dureza "blanda" una restricción nunca descarta nada: solo suma o resta puntos
     según 'peso' (0 a 1, por omisión 0.5). 'incluir_materia' con dureza "dura" obliga a
     que el horario tenga esa materia ('requisitos' indica cuántas secciones sobreviven).
+    TONO DEL USUARIO: la dureza la decide el CONTENIDO ("no puedo", "nunca", una razón
+    concreta como trabajo o transporte => "dura"); la importancia de una restricción
+    "blanda" la decide el TONO, con el campo 'importancia': "ligera" ("si se puede",
+    "me da igual"), "normal" (sin énfasis), "fuerte" ("de verdad prefiero", "evita")
+    o "casi_obligatoria" ("lo necesito", "no quiero ni verlo"; solo se viola si una
+    restricción dura lo obliga). No uses 'importancia' en restricciones duras y no la
+    mezcles con 'peso'. Si dudas entre dura y blanda, pregunta al usuario.
+    'violaciones' lista qué preferencias blandas quedaron incumplidas, en qué NRC y
+    cuántos puntos costó: úsala para explicar los tradeoffs de cada plan.
     """
     return resolver(estrategia, nrcs, restricciones)
 
