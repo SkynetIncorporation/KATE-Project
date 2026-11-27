@@ -74,6 +74,7 @@ function agrega(clase, html) {
   const d = document.createElement("div");
   d.className = "msg " + clase; d.innerHTML = html;
   $("mensajes").appendChild(d); $("mensajes").scrollTop = $("mensajes").scrollHeight;
+  return d;
 }
 async function enviar(texto) {
   texto = texto.trim(); if (!texto) return;
@@ -83,7 +84,23 @@ async function enviar(texto) {
     return;
   }
   let tope = 24, v = [420, 1260], nota = "";
+  const esperando = agrega("bot", "<p>Pensando…</p>");
   const ia = await interpretaConGemini(texto);
+  esperando.remove();
+  const planesIA = (ia?.planes || []).map(p => {   // NRC del algoritmo MCP -> secciones del catálogo
+    const clases = p.nrcs.map(n => CATALOGO.find(c => c.nrc === n)).filter(Boolean);
+    return {nombre: p.nombre, clases, cr: p.creditos_total ?? clases.reduce((s, c) => s + c.creditos, 0),
+            sacrifica: p.sacrifica || "nada relevante"};
+  }).filter(p => p.clases.length);
+  if (planesIA.length) {
+    ultimos = planesIA;
+    const texto_ia = esc(ia.respuesta).replace(/\n/g, "<br>");
+    agrega("bot", (texto_ia ? `<p>${texto_ia}</p>` : "") +
+      ultimos.map((p, i) => `<div class="plan"><strong>${esc(p.nombre)}</strong>
+        <p class="sac">Se sacrifica: ${esc(p.sacrifica)}.</p>
+        <button class="btn" type="button" data-plan="${i}">Ver horario</button></div>`).join(""));
+    return;
+  }
   if (ia) {
     if (ia.creditos_max) tope = ia.creditos_max;
     if (ia.hora_inicio && ia.hora_fin) v = [aMin(ia.hora_inicio), aMin(ia.hora_fin)];

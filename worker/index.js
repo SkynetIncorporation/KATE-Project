@@ -46,7 +46,7 @@ export default {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Kate-Secret": env.BACKEND_SECRET },
           body: JSON.stringify({ texto }),
-          signal: AbortSignal.timeout(25000)
+          signal: AbortSignal.timeout(45000)
         });
         if (rb.ok) return new Response(await rb.text(), { headers: { ...cors, "Content-Type": "application/json" } });
         console.error(`Backend respondió ${rb.status}`);
