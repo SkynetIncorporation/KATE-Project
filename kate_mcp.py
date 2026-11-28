@@ -166,6 +166,17 @@ TIPOS_RESTRICCION: dict[str, dict] = {
             "materia": "Programación para Internet",
         },
     },
+    "incluir_profesor": {
+        "categoria": "requisito",
+        "dureza_permitida": ["dura", "blanda"],
+        "descripcion": (
+            "Dura: el horario DEBE incluir al menos una sección impartida por un "
+            "profesor que contenga el texto dado (sin acentos ni mayúsculas). Blanda: "
+            "las secciones de ese profesor suman puntos (peso 0-1), pero no es obligatorio."
+        ),
+        "campos": {"profesor": "texto (nombre o apellido del profesor)"},
+        "ejemplo": {"tipo": "incluir_profesor", "dureza": "blanda", "profesor": "Lopez Alcala", "importancia": "fuerte"},
+    },
     "preferir_hora": {
         "categoria": "preferencia",
         "dureza_permitida": ["blanda"],
@@ -207,7 +218,9 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
             _a_minutos(r["hora"])  # lanza ValueError si el formato es inválido
             n["hora"] = r["hora"]
         elif tipo == "excluir_profesor":
-            n["profesor"] = str(r["profesor"])
+            if not str(r["profesor"]).strip():
+                raise ValueError("excluir_profesor: 'profesor' no puede estar vacío.")
+            n["profesor"] = str(r["profesor"]).strip()
         elif tipo == "excluir_dias":
             dias = [str(d).upper() for d in r["dias"]]
             invalidos = set(dias) - DIAS_VALIDOS
@@ -242,6 +255,10 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
             if not str(r["materia"]).strip():
                 raise ValueError("incluir_materia: 'materia' no puede estar vacía.")
             n["materia"] = str(r["materia"]).strip()
+        elif tipo == "incluir_profesor":
+            if not str(r["profesor"]).strip():
+                raise ValueError("incluir_profesor: 'profesor' no puede estar vacío.")
+            n["profesor"] = str(r["profesor"]).strip()
         elif tipo == "preferir_hora":
             _a_minutos(r["hora"])  # lanza ValueError si el formato es inválido
             n["hora"] = r["hora"]
@@ -268,6 +285,17 @@ def validar_restricciones(restricciones: list[dict] | None) -> list[dict]:
                 "una restricción dura no tiene niveles."
             )
         normalizadas.append(n)
+    duras_inc = [_norm(n["profesor"]) for n in normalizadas
+                 if n["tipo"] == "incluir_profesor" and n["dureza"] == "dura"]
+    duras_exc = [_norm(n["profesor"]) for n in normalizadas
+                 if n["tipo"] == "excluir_profesor" and n["dureza"] == "dura"]
+    for a in duras_inc:
+        for b in duras_exc:
+            if a in b or b in a:
+                raise ValueError(
+                    f"Contradicción: incluir_profesor y excluir_profesor (ambas duras) "
+                    f"apuntan al mismo profesor ({a!r} / {b!r})."
+                )
     maximos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "max_creditos"]
     minimos = [float(n["creditos"]) for n in normalizadas if n["tipo"] == "min_creditos"]
     if maximos and minimos and max(minimos) > min(maximos):
@@ -299,6 +327,8 @@ def _describir_base(r: dict) -> str:
         return f"ventana libre de {r['inicio']} a {r['fin']} los días {', '.join(r['dias'])}"
     if t == "incluir_materia":
         return f"incluir la materia '{r['materia']}'"
+    if t == "incluir_profesor":
+        return f"incluir al menos una sección del profesor '{r['profesor']}'"
     if t == "preferir_hora":
         return f"preferir clases cerca de las {r['hora']}"
     return t
@@ -375,6 +405,18 @@ def _coincide_materia(clase: dict, r: dict) -> bool:
     return texto in _norm(clase["materia"]) or texto == _norm(clase["clave"])
 
 
+def _coincide_profesor(clase: dict, r: dict) -> bool:
+    """True si el profesor de la sección contiene el texto pedido (sin acentos)."""
+    return _norm(r["profesor"]) in _norm(clase["profesor"])
+
+
+def _coincide_requisito(clase: dict, r: dict) -> bool:
+    """True si la sección satisface un requisito (incluir_materia o incluir_profesor)."""
+    if r["tipo"] == "incluir_profesor":
+        return _coincide_profesor(clase, r)
+    return _coincide_materia(clase, r)
+
+
 def _bono_blanda(clase: dict, r: dict) -> float:
     """Puntos que una preferencia blanda suma (o resta) a una sección."""
     puntos = r["peso"] * ESCALA_PREFERENCIA
@@ -384,8 +426,8 @@ def _bono_blanda(clase: dict, r: dict) -> float:
         punto_medio = sum(_intervalo(clase)) / 2
         distancia = abs(punto_medio - _a_minutos(r["hora"]))
         return puntos * max(0.0, 1 - distancia / DIST_MAX_MIN)
-    if r["tipo"] == "incluir_materia":
-        return puntos if _coincide_materia(clase, r) else 0.0
+    if r["tipo"] in ("incluir_materia", "incluir_profesor"):
+        return puntos if _coincide_requisito(clase, r) else 0.0
     # Filtro blando: penaliza a la sección que lo incumple, sin descartarla.
     return 0.0 if _cumple_filtro(clase, r) else -puntos
 
@@ -400,10 +442,11 @@ def _violaciones(elegidas: list[dict], blandas: list[dict] | None) -> list[dict]
     for r in blandas or []:
         puntos = r["peso"] * ESCALA_PREFERENCIA
         texto = describir_restriccion(r)
-        if r["tipo"] == "incluir_materia":
-            if not any(_coincide_materia(c, r) for c in elegidas):
+        if r["tipo"] in ("incluir_materia", "incluir_profesor"):
+            if not any(_coincide_requisito(c, r) for c in elegidas):
                 resultado.append({
-                    "restriccion": texto, "nrc": None, "materia": r["materia"],
+                    "restriccion": texto, "nrc": None,
+                    "materia": r.get("materia"), "profesor": r.get("profesor"),
                     "costo": round(puntos, 2),
                 })
         elif r["tipo"] == "preferir_hora":
@@ -493,7 +536,7 @@ def _es_factible(
     if not all(_cumple_minimo(subconjunto, r) for r in minimos or []):
         return False
     return all(
-        any(_coincide_materia(c, r) for c in subconjunto) for r in requisitos or []
+        any(_coincide_requisito(c, r) for c in subconjunto) for r in requisitos or []
     )
 
 
@@ -581,10 +624,10 @@ def horario_voraz(
     # 1) Materias obligatorias: la mejor sección compatible de cada una.
     #    Limitación de la heurística: no reconsidera esta elección después.
     for r in requisitos:
-        if any(_coincide_materia(c, r) for c in elegidas):
+        if any(_coincide_requisito(c, r) for c in elegidas):
             continue
         opciones = sorted(
-            (c for c in candidatas if _coincide_materia(c, r)),
+            (c for c in candidatas if _coincide_requisito(c, r)),
             key=lambda c: (-_valor(c, blandas), c["nrc"]),
         )
         for clase in opciones:
@@ -685,14 +728,14 @@ def horario_backtracking(
 
     def cumple_completo(elegidas: list[dict]) -> bool:
         return all(
-            any(_coincide_materia(c, r) for c in elegidas) for r in requisitos
+            any(_coincide_requisito(c, r) for c in elegidas) for r in requisitos
         ) and all(_cumple_minimo(elegidas, r) for r in minimos)
 
     def alcanzable(elegidas: list[dict], creditos: int, viables: list[int]) -> bool:
         """False si ningún descendiente puede cumplir los requisitos o mínimos."""
         for r in requisitos:
-            if not any(_coincide_materia(c, r) for c in elegidas) and not any(
-                _coincide_materia(ordenadas[j], r) for j in viables
+            if not any(_coincide_requisito(c, r) for c in elegidas) and not any(
+                _coincide_requisito(ordenadas[j], r) for j in viables
             ):
                 return False
         if minimos:
@@ -789,7 +832,7 @@ def resolver(
     requisitos = [r for r in reglas if _clase(r) == "requisito"]
     blandas = [r for r in reglas if _clase(r) == "blanda"]
     antes = {
-        describir_restriccion(r): sum(_coincide_materia(c, r) for c in candidatas)
+        describir_restriccion(r): sum(_coincide_requisito(c, r) for c in candidatas)
         for r in requisitos
     }
 
@@ -807,7 +850,7 @@ def resolver(
     resultado["requisitos"] = {
         describir_restriccion(r): {
             "secciones_antes_de_filtros": antes[describir_restriccion(r)],
-            "secciones_tras_filtros": sum(_coincide_materia(c, r) for c in candidatas),
+            "secciones_tras_filtros": sum(_coincide_requisito(c, r) for c in candidatas),
         }
         for r in requisitos
     }
@@ -816,7 +859,7 @@ def resolver(
         resultado["mensaje"] = (
             "No se encontró ningún horario. Revisa 'descartados_por_filtro' para ver "
             "qué restricción eliminó más NRC y considera relajarla. Si hay requisitos "
-            "('incluir_materia' dura), revisa 'requisitos': puede que ninguna sección "
+            "('incluir_materia' o 'incluir_profesor' duras), revisa 'requisitos': puede que ninguna sección "
             "haya sobrevivido a los filtros o que no quepa con el resto del horario."
             " Si usaste 'min_creditos', puede que las secciones disponibles no "
             "alcancen ese mínimo sin conflictos."
@@ -861,6 +904,10 @@ def armar_horario(
     Con dureza "blanda" una restricción nunca descarta nada: solo suma o resta puntos
     según 'peso' (0 a 1, por omisión 0.5). 'incluir_materia' con dureza "dura" obliga a
     que el horario tenga esa materia ('requisitos' indica cuántas secciones sobreviven).
+    PROFESORES: 'excluir_profesor' e 'incluir_profesor' aceptan dureza "dura" o "blanda".
+    Dura: excluir descarta sus NRC; incluir exige al menos una sección de ese profesor.
+    Blanda: excluir penaliza y incluir bonifica sus NRC, según 'importancia'. Excluir e
+    incluir duras sobre el mismo profesor se rechazan por contradictorias.
     TONO DEL USUARIO: la dureza la decide el CONTENIDO ("no puedo", "nunca", una razón
     concreta como trabajo o transporte => "dura"); la importancia de una restricción
     "blanda" la decide el TONO, con el campo 'importancia': "ligera" ("si se puede",
